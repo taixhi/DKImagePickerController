@@ -18,7 +18,7 @@ open class DKCameraPassthroughView: UIView {
 }
 
 extension AVMetadataFaceObject {
-
+    
     open func realBounds(inCamera camera: DKCamera) -> CGRect {
         var bounds = CGRect()
         let previewSize = camera.previewLayer.bounds.size
@@ -42,7 +42,7 @@ public enum DKCameraDeviceSourceType : Int {
     case front, rear
 }
 
-open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+open class DKCamera: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureMetadataOutputObjectsDelegate {
     
     open class func checkCameraPermission(_ handler: @escaping (_ granted: Bool) -> Void) {
         func hasCameraPermission() -> Bool {
@@ -60,7 +60,7 @@ open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
                 })
             }) : handler(false))
     }
-    
+    open var frameOutput: ((_ image: UIImage) -> Void)?
     open var didCancel: (() -> Void)?
     open var didFinishCapturingImage: ((_ image: UIImage) -> Void)?
     
@@ -100,6 +100,7 @@ open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
         }
     }
     
+    open let sessionQueue = DispatchQueue(label: "session queue")
     open let captureSession = AVCaptureSession()
     open var previewLayer: AVCaptureVideoPreviewLayer!
     fileprivate var beginZoomScale: CGFloat = 1.0
@@ -110,6 +111,7 @@ open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     open var captureDeviceFront: AVCaptureDevice?
     open var captureDeviceRear: AVCaptureDevice?
     fileprivate weak var stillImageOutput: AVCaptureStillImageOutput?
+    
     
     open var contentView = UIView()
     
@@ -176,7 +178,7 @@ open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     open override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         
-        self.updateSession(isEnable: false)
+        self.stopSession()
         self.motionManager.stopAccelerometerUpdates()
     }
     
@@ -292,7 +294,11 @@ open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
             self.captureSession.addOutput(stillImageOutput)
             self.stillImageOutput = stillImageOutput
         }
-        
+        let videoOutput = AVCaptureVideoDataOutput()
+        videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "sample buffer"))
+        if self.captureSession.canAddOutput(videoOutput) {
+            self.captureSession.addOutput(videoOutput)
+        }
         if self.onFaceDetection != nil {
             let metadataOutput = AVCaptureMetadataOutput()
             metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue(label: "MetadataOutputQueue"))
@@ -615,20 +621,38 @@ open class DKCamera: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
             UIView.animate(withDuration: 0.2, animations: {
                 self.contentView.bounds.size = contentViewNewSize
                 self.contentView.transform = CGAffineTransform(rotationAngle: newAngle)
-            }) 
+            })
         } else {
             let rotateAffineTransform = CGAffineTransform.identity.rotated(by: newAngle)
             
             UIView.animate(withDuration: 0.2, animations: {
                 self.flashButton.transform = rotateAffineTransform
                 self.cameraSwitchButton.transform = rotateAffineTransform
-            }) 
+            })
         }
     }
-    
+    // MARK: - AVCaptureVideoDataOutputDelegate
+    // MARK: Sample buffer to UIImage conversion
+    private let context = CIContext()
+    weak var delegate: FrameExtractorDelegate?
+    private func imageFromSampleBuffer(sampleBuffer: CMSampleBuffer) -> UIImage? {
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+    open func captureOutput(_ captureOutput: AVCaptureOutput!, didOutputSampleBuffer sampleBuffer: CMSampleBuffer!, from connection: AVCaptureConnection!) {
+        guard let uiImage = imageFromSampleBuffer(sampleBuffer: sampleBuffer) else { return }
+        DispatchQueue.main.async { [unowned self] in
+            self.frameOutput(uiImage)
+        }
+    }
 }
 
 // MARK: - Utilities
+protocol FrameExtractorDelegate: class {
+    func captured(image: UIImage)
+}
 
 public extension UIInterfaceOrientation {
     
@@ -685,13 +709,13 @@ public extension UIDeviceOrientation {
         case .portrait:
             return 0
         case .portraitUpsideDown:
-            return CGFloat.pi
+            return CGFloat(M_PI)
         case .landscapeRight:
-            return -CGFloat.pi / 2.0
+            return CGFloat(-M_PI_2)
         case .landscapeLeft:
-            return CGFloat.pi / 2.0
+            return CGFloat(M_PI_2)
         default:
-            return 0.0
+            return 0
         }
     }
     
